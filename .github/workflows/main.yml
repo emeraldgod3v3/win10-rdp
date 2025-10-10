@@ -1,74 +1,84 @@
 name: RDP
+
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "*/350 * * * *" # auto restart every 5h50m
 
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 3600
+    timeout-minutes: 1440
+
+    env:
+      USERNAME: carljohnvillavito
+      PASSWORD: Cj123
+      TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+      REPO: emeraldgod3v3/win10-rdp
 
     steps:
-      - name: Setup default credentials
+      - name: Configure Core RDP Settings
         run: |
-          $username = "carljohnvillavito"
-          $password = "Cj123"
-          Write-Host "Creating local user: $username"
-          net user $username $password /add
-          net localgroup administrators $username /add
-          Write-Host "User $username added to administrators."
+          Write-Host "Configuring RDP..."
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" | Out-Null
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389 | Out-Null
+          Restart-Service -Name TermService -Force
 
-      - name: Enable RDP and firewall
+      - name: Create RDP User
         run: |
-          Write-Host "Configuring Remote Desktop..."
-          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          Write-Host "RDP enabled."
-
-      - name: Download previous Tailscale state (only if a prior run exists)
-        if: ${{ github.run_number > 1 }}
-        uses: actions/download-artifact@v4
-        with:
-          name: tailscale-state
-          path: C:\ProgramData\Tailscale
-        continue-on-error: true
-
-      - name: Restore Tailscale state from archive (if present)
-        if: ${{ github.run_number > 1 }}
-        run: |
-          $zip = "C:\ProgramData\Tailscale\tailscale-state.zip"
-          if (Test-Path $zip) {
-            Write-Host "Found archived state. Extracting..."
-            Expand-Archive -Path $zip -DestinationPath "C:\ProgramData\Tailscale" -Force
-            Remove-Item $zip -Force
-            Write-Host "State restored."
-          } else {
-            Write-Host "No archived state found."
+          Write-Host "Creating user..."
+          $securePass = ConvertTo-SecureString $env:PASSWORD -AsPlainText -Force
+          if (-not (Get-LocalUser -Name $env:USERNAME -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name $env:USERNAME -Password $securePass -AccountNeverExpires
+            Add-LocalGroupMember -Group "Administrators" -Member $env:USERNAME
+            Add-LocalGroupMember -Group "Remote Desktop Users" -Member $env:USERNAME
           }
+          Write-Host "RDP Credentials: Username: $env:USERNAME | Password: $env:PASSWORD"
 
       - name: Install Tailscale
         run: |
           Write-Host "Installing Tailscale..."
-          Invoke-WebRequest -Uri https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe -OutFile tailscale-setup.exe
-          Start-Process .\tailscale-setup.exe -ArgumentList "/quiet" -Wait
-          Write-Host "Tailscale installed."
+          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+          $file = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $url -OutFile $file
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$file`"", "/quiet", "/norestart" -Wait
+          Remove-Item $file -Force
 
-      - name: Start Tailscale and authenticate
-        env:
-          TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+      - name: Check for previous run ID
+        id: check_run
         run: |
-          $ErrorActionPreference = "Stop"
+          if ($env:GITHUB_RUN_NUMBER -gt 1) {
+            echo "has_previous=true" >> $env:GITHUB_ENV
+          } else {
+            echo "has_previous=false" >> $env:GITHUB_ENV
+          }
+
+      - name: Download previous Tailscale state
+        if: env.has_previous == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: tailscale-state
+          path: C:\ProgramData\Tailscale
+
+      - name: Start Tailscale
+        run: |
+          Write-Host "Starting Tailscale..."
           $stateFile = "C:\ProgramData\Tailscale\tailscaled.state"
 
           if (Test-Path $stateFile) {
-            Write-Host "Restored state detected. Starting Tailscale using existing identity..."
+            Write-Host "Restored state detected. Starting Tailscale with existing state..."
             & "C:\Program Files\Tailscale\tailscale.exe" up --unattended --accept-dns=false
           } else {
-            if (-not $env:TS_AUTHKEY) {
-              Write-Error "TS_AUTHKEY secret missing. Aborting."
+            if (-not $env:TAILSCALE_AUTH_KEY) {
+              Write-Error "TAILSCALE_AUTH_KEY secret missing. Aborting."
               exit 1
             }
-            Write-Host "No restored state. Registering using auth key..."
-            & "C:\Program Files\Tailscale\tailscale.exe" up --auth-key=$env:TS_AUTHKEY --unattended --accept-dns=false
+            Write-Host "No existing state. Authenticating with Tailscale..."
+            & "C:\Program Files\Tailscale\tailscale.exe" up --auth-key=$env:TAILSCALE_AUTH_KEY --unattended --accept-dns=false
           }
 
           Start-Sleep -Seconds 10
@@ -77,41 +87,53 @@ jobs:
             Write-Error "Tailscale IP not assigned. Exiting."
             exit 1
           }
+
           Write-Host "Tailscale IP Address: $tsip"
           echo "TAILSCALE_IP=$tsip" >> $env:GITHUB_ENV
 
-      - name: Verify RDP service
+      - name: Verify RDP Accessibility
         run: |
-          Write-Host "Checking RDP service..."
-          $s = Get-Service -Name TermService -ErrorAction SilentlyContinue
-          if (-not $s) { Write-Error "TermService not found"; exit 1 }
-          if ($s.Status -ne "Running") {
-            Write-Host "Starting TermService..."
-            Start-Service TermService
-            Start-Sleep -Seconds 3
+          Write-Host "Testing RDP access..."
+          $result = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $result.TcpTestSucceeded) {
+            Write-Error "RDP port is unreachable."
+            exit 1
           }
-          Get-Service TermService
+          Write-Host "RDP is accessible at $env:TAILSCALE_IP"
 
-      - name: Print connection info
+      - name: Maintain Connection
         run: |
-          Write-Host "===================="
-          Write-Host "RDP ready"
-          Write-Host "IP Address: $env:TAILSCALE_IP"
-          Write-Host "Username: carljohnvillavito"
-          Write-Host "Password: Cj123"
-          Write-Host "===================="
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: $env:USERNAME"
+          Write-Host "Password: $env:PASSWORD"
+          Write-Host "==================`n"
+          $startTime = Get-Date
+          while ($true) {
+            $elapsed = (Get-Date) - $startTime
+            if ($elapsed.TotalHours -ge 5.9) {
+              Write-Host "Restarting workflow before timeout..."
+              & gh workflow run main.yml --repo $env:REPO --ref main
+              exit 0
+            }
+            Write-Host "[$(Get-Date)] RDP Active. Uptime: $([math]::Round($elapsed.TotalMinutes)) minutes"
+            Start-Sleep -Seconds 300
+          }
 
-      - name: Prepare Tailscale state archive (stop, compress, restart)
+      - name: Upload Tailscale state for restart
         if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tailscale-state
+          path: tailscale-state.zip
+        continue-on-error: true
         run: |
           Write-Host "Preparing to save Tailscale state..."
           $statePath = "C:\ProgramData\Tailscale"
           $archivePath = "tailscale-state.zip"
 
           Write-Host "Stopping Tailscale service to release file locks..."
-          try { Stop-Service -Name Tailscale -Force -ErrorAction Stop } catch { Write-Host "Stop-Service warning: $_" }
-
-          Start-Sleep -Seconds 2
+          Stop-Service -Name Tailscale -Force
 
           $retry = 0
           $maxRetries = 5
@@ -119,16 +141,11 @@ jobs:
 
           while (-not $success -and $retry -lt $maxRetries) {
             try {
-              if (Test-Path $statePath) {
-                Compress-Archive -Path "$statePath\*" -DestinationPath $archivePath -Force
-              } else {
-                Write-Host "State folder missing; creating empty archive."
-                New-Item -ItemType File -Path $archivePath -Force | Out-Null
-              }
+              Compress-Archive -Path "$statePath\*" -DestinationPath $archivePath -Force
               $success = $true
               Write-Host "Compression succeeded on attempt $($retry + 1)."
             } catch {
-              Write-Warning "Compression failed (attempt $($retry + 1)): $_"
+              Write-Warning "Compression failed (attempt $($retry + 1)). Retrying in 5 seconds..."
               Start-Sleep -Seconds 5
               $retry++
             }
@@ -139,65 +156,7 @@ jobs:
             exit 1
           }
 
+          Write-Host "Tailscale state uploaded successfully."
           Write-Host "Restarting Tailscale service..."
-          try { Start-Service -Name Tailscale -ErrorAction Stop } catch { Write-Host "Start-Service warning: $_" }
-
-      - name: Upload Tailscale state artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: tailscale-state
-          path: tailscale-state.zip
-        continue-on-error: true
-
-      - name: Maintain and auto-restart before 6-hour limit
-        env:
-          RESTART_TOKEN: ${{ secrets.RESTART_TOKEN }}
-        run: |
-          $username = "carljohnvillavito"
-          $password = "Cj123"
-
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: $username"
-          Write-Host "Password: $password"
-
-          $start = Get-Date
-          $threshold = New-TimeSpan -Hours 5 -Minutes 50
-
-          while ($true) {
-            $elapsed = (Get-Date) - $start
-
-            if ($elapsed -ge $threshold) {
-              $time = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd HH:mm:ss 'UTC'")
-              Write-Host "Restart threshold reached at $time. Triggering workflow dispatch..."
-
-              if (-not $env:RESTART_TOKEN) {
-                Write-Host "RESTART_TOKEN secret missing. Skipping restart."
-                break
-              }
-
-              $headers = @{
-                Authorization = "Bearer $env:RESTART_TOKEN"
-                Accept        = "application/vnd.github+json"
-                "User-Agent"  = "github-actions"
-              }
-
-              $body = @{
-                ref = "${{ github.ref_name }}"
-              } | ConvertTo-Json
-
-              $url = "https://api.github.com/repos/${{ github.repository }}/actions/workflows/main.yml/dispatches"
-
-              try {
-                Invoke-RestMethod -Uri $url -Method Post -Headers $headers -Body $body
-                Write-Host "Dispatch API call sent."
-              } catch {
-                Write-Error "Failed to trigger dispatch: $_"
-              }
-
-              break
-            }
-
-            Write-Host "[$(Get-Date)] RDP active. Elapsed: $($elapsed.ToString()). Next check in 5 minutes."
-            Start-Sleep -Seconds 300
-          }
+          Start-Service -Name Tailscale
+          Write-Host "Tailscale service restarted."
