@@ -2,9 +2,7 @@ name: RDP
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "*/350 * * * *" # auto restart every 5h50m
-
+  
 jobs:
   secure-rdp:
     runs-on: windows-latest
