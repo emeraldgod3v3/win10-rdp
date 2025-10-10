@@ -38,17 +38,28 @@ jobs:
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
 
+      # --- Fix: skip download on first run ---
+      - name: Check for previous run ID
+        id: check_run
+        run: |
+          if ($env:GITHUB_RUN_NUMBER -gt 1) {
+            echo "has_previous=true" >> $env:GITHUB_ENV
+          } else {
+            echo "has_previous=false" >> $env:GITHUB_ENV
+          }
+
       - name: Download previous Tailscale state
-        if: ${{ github.run_number > 1 }}
+        if: env.has_previous == 'true'
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: tailscale-state
-          path: C:\TailscaleState
-        continue-on-error: true
+          path: C:\ProgramData\Tailscale
+      # ---------------------------------------
 
       - name: Establish Tailscale Connection
         run: |
-          $stateDir = "C:\TailscaleState"
+          $stateDir = "C:\ProgramData\Tailscale"
           if (-not (Test-Path $stateDir)) { New-Item -ItemType Directory -Path $stateDir | Out-Null }
 
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
@@ -89,7 +100,7 @@ jobs:
             if ($elapsed.TotalHours -ge 5.9) {
               Write-Host "Restarting workflow before 6-hour limit..."
               & "$env:ProgramFiles\Tailscale\tailscale.exe" logout
-              Compress-Archive -Path "C:\TailscaleState" -DestinationPath "C:\tailscale-state.zip" -Force
+              Compress-Archive -Path "C:\ProgramData\Tailscale" -DestinationPath "C:\tailscale-state.zip" -Force
               break
             }
             Write-Host "[$(Get-Date)] RDP Active - uptime: $($elapsed.ToString())"
@@ -108,6 +119,11 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           RESTART_TOKEN: ${{ secrets.RESTART_TOKEN }}
         run: |
+          if (-not $env:RESTART_TOKEN) {
+            Write-Host "No restart token found. Skipping restart."
+            exit 0
+          }
+
           $headers = @{
             Authorization = "Bearer $env:RESTART_TOKEN"
             Accept = "application/vnd.github+json"
