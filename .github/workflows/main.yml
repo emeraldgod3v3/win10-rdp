@@ -1,4 +1,4 @@
-name: RDP
+name: WIN10-RDP
 
 on:
   workflow_dispatch:
