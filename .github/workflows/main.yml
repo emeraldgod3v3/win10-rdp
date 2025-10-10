@@ -83,10 +83,41 @@ jobs:
     - name: Upload Tailscale state for restart
       if: always()
       run: |
-        Write-Host "Saving Tailscale state..."
-        Compress-Archive -Path "C:\ProgramData\Tailscale\*" -DestinationPath tailscale-state.zip
-        & gh run upload-artifact --name tailscale-state --path tailscale-state.zip
+        Write-Host "Preparing to save Tailscale state..."
+        $statePath = "C:\ProgramData\Tailscale"
+        $archivePath = "tailscale-state.zip"
+
+        Write-Host "Stopping Tailscale service to release file locks..."
+        Stop-Service -Name Tailscale -Force
+
+        $retry = 0
+        $maxRetries = 5
+        $success = $false
+
+        while (-not $success -and $retry -lt $maxRetries) {
+          try {
+            Compress-Archive -Path "$statePath\*" -DestinationPath $archivePath -Force
+            $success = $true
+            Write-Host "Compression succeeded on attempt $($retry + 1)."
+          } catch {
+            Write-Warning "Compression failed (attempt $($retry + 1)). Retrying in 5 seconds..."
+            Start-Sleep -Seconds 5
+            $retry++
+          }
+        }
+
+        if (-not $success) {
+          Write-Error "Failed to compress Tailscale state after multiple attempts."
+          exit 1
+        }
+
+        Write-Host "Uploading Tailscale state..."
+        & gh run upload-artifact --name tailscale-state --path $archivePath
         Write-Host "Tailscale state uploaded successfully."
+
+        Write-Host "Restarting Tailscale service..."
+        Start-Service -Name Tailscale
+        Write-Host "Tailscale service restarted."
 
     - name: Auto restart before 6-hour limit
       run: |
