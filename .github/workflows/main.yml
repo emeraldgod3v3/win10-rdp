@@ -37,11 +37,13 @@ jobs:
           Start-Process msiexec.exe -ArgumentList "/i", "`"$f`"", "/quiet", "/norestart" -Wait
           Remove-Item $f -Force
 
-      - name: Download Previous State
+      - name: Download previous Tailscale state
+        if: ${{ github.run_number > 1 }}
         uses: actions/download-artifact@v4
         with:
-          name: tailscale-state
-          path: C:\ProgramData\Tailscale
+         name: tailscale-state
+         path: C:\TailscaleState
+         continue-on-error: true
 
       - name: Connect Tailscale
         run: |
