@@ -6,7 +6,7 @@ on:
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 360
+    timeout-minutes: 1440  # 24 hours
 
     steps:
       - name: Configure Core RDP Settings
@@ -14,96 +14,107 @@ jobs:
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
-          netsh advfirewall firewall delete rule name="RDP-Tailscale" | Out-Null
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
 
       - name: Create RDP User
         run: |
-          $u = "carljohnvillavito"
-          $p = "Cj123"
-          $sp = ConvertTo-SecureString $p -AsPlainText -Force
-          if (-not (Get-LocalUser -Name $u -ErrorAction SilentlyContinue)) {
-            New-LocalUser -Name $u -Password $sp -AccountNeverExpires
+          $username = "carljohnvillavito"
+          $password = "Cj123"
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name $username -Password $securePass -AccountNeverExpires
+            Add-LocalGroupMember -Group "Administrators" -Member $username
+            Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
           }
-          Add-LocalGroupMember -Group "Administrators" -Member $u -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $u -ErrorAction SilentlyContinue
+          echo "RDP_CREDS=User: $username | Password: $password" >> $env:GITHUB_ENV
 
       - name: Install Tailscale
         run: |
-          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $f = "$env:TEMP\tailscale.msi"
-          Invoke-WebRequest -Uri $url -OutFile $f
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$f`"", "/quiet", "/norestart" -Wait
-          Remove-Item $f -Force
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
 
       - name: Download previous Tailscale state
         if: ${{ github.run_number > 1 }}
         uses: actions/download-artifact@v4
         with:
-         name: tailscale-state
-         path: C:\TailscaleState
-         continue-on-error: true
-
-      - name: Connect Tailscale
-        run: |
-          $stateFile = "C:\ProgramData\Tailscale\tailscaled.state"
-          if (-not (Test-Path $stateFile)) {
-            Write-Host "No previous state found, starting fresh."
-            & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=carljohn-rdp --accept-dns=false
-          } else {
-            Write-Host "Reusing previous Tailscale state."
-            & "$env:ProgramFiles\Tailscale\tailscale.exe" up --state=$stateFile --accept-dns=false
-          }
-
-          $tsIP = $null
-          $tries = 0
-          while (-not $tsIP -and $tries -lt 10) {
-            $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-            Start-Sleep -Seconds 5
-            $tries++
-          }
-          if (-not $tsIP) { Write-Error "No Tailscale IP"; exit 1 }
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-
-      - name: Verify RDP
-        run: |
-          $ok = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $ok.TcpTestSucceeded) { exit 1 }
-          Write-Host "RDP reachable at $env:TAILSCALE_IP"
-
-      - name: Save State for Next Run
-        run: |
-          mkdir C:\temp -ErrorAction SilentlyContinue
-          Copy-Item "C:\ProgramData\Tailscale\tailscaled.state" "C:\temp\tailscaled.state" -Force
+          name: tailscale-state
+          path: C:\TailscaleState
         continue-on-error: true
 
-      - name: Upload State Artifact
+      - name: Establish Tailscale Connection
+        run: |
+          $stateDir = "C:\TailscaleState"
+          if (-not (Test-Path $stateDir)) { New-Item -ItemType Directory -Path $stateDir | Out-Null }
+
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
+            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} `
+            --state="$stateDir\tailscale.state" `
+            --hostname=gh-runner-$env:GITHUB_RUN_ID
+
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 10) {
+            $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+            Start-Sleep -Seconds 5
+            $retries++
+          }
+
+          if (-not $tsIP) {
+            Write-Error "Tailscale IP not assigned. Exiting."
+            exit 1
+          }
+
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+
+      - name: Verify RDP Accessibility
+        run: |
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+            Write-Error "TCP connection to RDP port 3389 failed"
+            exit 1
+          }
+          Write-Host "TCP connectivity successful!"
+
+      - name: Maintain and Auto-Restart Before 6 Hours
+        run: |
+          $start = Get-Date
+          while ($true) {
+            $elapsed = (Get-Date) - $start
+            if ($elapsed.TotalHours -ge 5.9) {
+              Write-Host "Restarting workflow before 6-hour limit..."
+              & "$env:ProgramFiles\Tailscale\tailscale.exe" logout
+              Compress-Archive -Path "C:\TailscaleState" -DestinationPath "C:\tailscale-state.zip" -Force
+              break
+            }
+            Write-Host "[$(Get-Date)] RDP Active - uptime: $($elapsed.ToString())"
+            Start-Sleep -Seconds 300
+          }
+
+      - name: Upload Tailscale state before restart
         uses: actions/upload-artifact@v4
         with:
           name: tailscale-state
-          path: C:\temp\tailscaled.state
+          path: C:\tailscale-state.zip
 
-      - name: Maintain and Auto-Restart
+      - name: Restart Workflow
+        env:
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RESTART_TOKEN: ${{ secrets.RESTART_TOKEN }}
         run: |
-          Write-Host "`nAddress: $env:TAILSCALE_IP"
-          Write-Host "Username: carljohnvillavito"
-          Write-Host "Password: Cj123`n"
-
-          $start = Get-Date
-          $limit = (New-TimeSpan -Hours 5 -Minutes 50)
-
-          while ($true) {
-            if ((Get-Date) - $start -ge $limit) {
-              Write-Host "Restarting before timeout..."
-              $headers = @{
-                Authorization = "Bearer $env:RESTART_TOKEN"
-                Accept = "application/vnd.github+json"
-              }
-              $body = @{ ref = "${{ github.ref }}" } | ConvertTo-Json
-              Invoke-RestMethod -Uri "https://api.github.com/repos/${{ github.repository }}/actions/workflows/${{ github.workflow }}/dispatches" -Method Post -Headers $headers -Body $body
-              break
-            }
-            Write-Host "[$(Get-Date)] Active - next restart in $(($limit - ((Get-Date)-$start)).ToString())"
-            Start-Sleep -Seconds 300
+          $headers = @{
+            Authorization = "Bearer $env:RESTART_TOKEN"
+            Accept = "application/vnd.github+json"
           }
+          $body = @{
+            ref = "${{ github.ref_name }}"
+          } | ConvertTo-Json
+          $url = "https://api.github.com/repos/$env:REPO/actions/workflows/rdp.yml/dispatches"
+          Invoke-RestMethod -Uri $url -Headers $headers -Body $body -Method Post
+          Write-Host "Triggered new workflow run successfully."
