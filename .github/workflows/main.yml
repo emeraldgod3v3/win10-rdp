@@ -1,8 +1,10 @@
-name: WIN10-RDP
+name: RDP
 
 on:
   workflow_dispatch:
-  
+  schedule:
+    - cron: "0 */6 * * *"  # safety backup auto-run every 6 hours
+
 jobs:
   secure-rdp:
     runs-on: windows-latest
@@ -12,6 +14,7 @@ jobs:
       USERNAME: carljohnvillavito
       PASSWORD: Cj123
       TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       REPO: emeraldgod3v3/win10-rdp
 
     steps:
@@ -45,17 +48,7 @@ jobs:
           Start-Process msiexec.exe -ArgumentList "/i", "`"$file`"", "/quiet", "/norestart" -Wait
           Remove-Item $file -Force
 
-      - name: Check for previous run ID
-        id: check_run
-        run: |
-          if ($env:GITHUB_RUN_NUMBER -gt 1) {
-            echo "has_previous=true" >> $env:GITHUB_ENV
-          } else {
-            echo "has_previous=false" >> $env:GITHUB_ENV
-          }
-
       - name: Download previous Tailscale state
-        if: env.has_previous == 'true'
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
@@ -66,15 +59,10 @@ jobs:
         run: |
           Write-Host "Starting Tailscale..."
           $stateFile = "C:\ProgramData\Tailscale\tailscaled.state"
-
           if (Test-Path $stateFile) {
-            Write-Host "Restored state detected. Starting Tailscale with existing state..."
+            Write-Host "Restored state detected. Starting Tailscale..."
             & "C:\Program Files\Tailscale\tailscale.exe" up --unattended --accept-dns=false
           } else {
-            if (-not $env:TAILSCALE_AUTH_KEY) {
-              Write-Error "TAILSCALE_AUTH_KEY secret missing. Aborting."
-              exit 1
-            }
             Write-Host "No existing state. Authenticating with Tailscale..."
             & "C:\Program Files\Tailscale\tailscale.exe" up --auth-key=$env:TAILSCALE_AUTH_KEY --unattended --accept-dns=false
           }
@@ -106,25 +94,21 @@ jobs:
           Write-Host "Username: $env:USERNAME"
           Write-Host "Password: $env:PASSWORD"
           Write-Host "==================`n"
+
           $startTime = Get-Date
           while ($true) {
             $elapsed = (Get-Date) - $startTime
             if ($elapsed.TotalHours -ge 5.9) {
-              Write-Host "Restarting workflow before timeout..."
-              & gh workflow run main.yml --repo $env:REPO --ref main
+              Write-Host "Triggering self-restart before timeout..."
+              gh workflow run main.yml --repo $env:REPO --ref main
               exit 0
             }
             Write-Host "[$(Get-Date)] RDP Active. Uptime: $([math]::Round($elapsed.TotalMinutes)) minutes"
             Start-Sleep -Seconds 300
           }
 
-      - name: Upload Tailscale state for restart
+      - name: Compress Tailscale state for restart
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: tailscale-state
-          path: tailscale-state.zip
-        continue-on-error: true
         run: |
           Write-Host "Preparing to save Tailscale state..."
           $statePath = "C:\ProgramData\Tailscale"
@@ -154,7 +138,14 @@ jobs:
             exit 1
           }
 
-          Write-Host "Tailscale state uploaded successfully."
           Write-Host "Restarting Tailscale service..."
           Start-Service -Name Tailscale
           Write-Host "Tailscale service restarted."
+
+      - name: Upload Tailscale state artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tailscale-state
+          path: tailscale-state.zip
+          retention-days: 1
