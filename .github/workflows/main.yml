@@ -1,9 +1,14 @@
-name: BilyabitsRDP (Version 2.0.1)
+name: BilyabitsRDP (Version 2.0.2)
 
 on:
   workflow_dispatch:
   schedule:
     - cron: "0 */6 * * *"  # auto restart every 6 hours
+
+permissions:
+  contents: write
+  actions: write
+  id-token: write
 
 jobs:
   secure-rdp:
@@ -11,6 +16,9 @@ jobs:
     timeout-minutes: 360
 
     steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
       - name: Configure RDP and Firewall
         shell: pwsh
         run: |
@@ -45,7 +53,7 @@ jobs:
             gh run download --name "tailscale-state" --dir "C:\ProgramData\Tailscale"
             Write-Host "Tailscale state restored successfully."
           } catch {
-            Write-Host "No previous Tailscale state found or runner not in git context. Continuing..."
+            Write-Host "No previous Tailscale state found or unable to access repository. Continuing..."
           }
 
       - name: Start Tailscale Service and Authenticate
@@ -63,7 +71,7 @@ jobs:
 
           $log = @"
           ===== RDP SESSION LOG =====
-          Version: 2.0.1
+          Version: 2.0.2
           Username: bilyabits
           Password: Cj123
           IP Address: $ip
@@ -91,5 +99,5 @@ jobs:
           GH_TOKEN: ${{ secrets.RESTART_TOKEN }}
         run: |
           Write-Host "Triggering auto restart..."
-          gh workflow run "BilyabitsRDP (Version 2.0.1)" --ref main
+          gh workflow run "BilyabitsRDP (Version 2.0.2)" --ref main
           Write-Host "Workflow restart triggered successfully."
