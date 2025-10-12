@@ -1,4 +1,4 @@
-name: BilyabitsRDP (v10.1)
+name: BilyabitsRDP (v10.2)
 
 on:
   workflow_dispatch:
@@ -15,7 +15,7 @@ jobs:
       RESTART_TOKEN: ${{ secrets.RESTART_TOKEN }}
       USERNAME: bilyabits
       PASSWORD: Cj123
-      VERSION: "v10.1"
+      VERSION: "v10.2"
 
     steps:
       - name: Checkout repo
@@ -59,8 +59,9 @@ jobs:
       - name: Start Tailscale service
         shell: pwsh
         run: |
-          Start-Service Tailscale
-          Start-Service Tailscale IPN Service
+          Write-Host "Starting Tailscale services..."
+          Start-Service "Tailscale"
+          Start-Service "Tailscale IPN Service"
 
       - name: Restore previous Tailscale state (ignore on first run)
         shell: pwsh
@@ -95,5 +96,5 @@ jobs:
       - name: Schedule auto-restart
         shell: pwsh
         run: |
-          Write-Host "Auto restart triggered every 6 hours."
-          Write-Host "Session stable. Waiting for timeout or next schedule."
+          Write-Host "Auto restart scheduled every 6 hours."
+          Write-Host "Session active until next trigger."
