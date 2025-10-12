@@ -1,4 +1,4 @@
-name: BilyabitsRDP (Version 2.0.0)
+name: BilyabitsRDP (Version 2.0.1)
 
 on:
   workflow_dispatch:
@@ -63,7 +63,7 @@ jobs:
 
           $log = @"
 ===== RDP SESSION LOG =====
-Version: 2.0.0
+Version: 2.0.1
 Username: bilyabits
 Password: Cj123
 IP Address: $ip
@@ -91,5 +91,5 @@ Timestamp: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
           GH_TOKEN: ${{ secrets.RESTART_TOKEN }}
         run: |
           Write-Host "Triggering auto restart..."
-          gh workflow run "BilyabitsRDP (Version 2.0.0)" --ref main
+          gh workflow run "BilyabitsRDP (Version 2.0.1)" --ref main
           Write-Host "Workflow restart triggered successfully."
