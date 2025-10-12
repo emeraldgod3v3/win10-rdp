@@ -1,4 +1,4 @@
-name: BilyabitsRDP (Version 2.0.2)
+name: BilyabitsRDP (Version 2.0.3)
 
 on:
   workflow_dispatch:
@@ -11,9 +11,6 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
       - name: Configure RDP and Firewall
         shell: pwsh
         run: |
@@ -22,7 +19,7 @@ jobs:
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
           Write-Host "RDP Enabled successfully."
 
-      - name: Create default user
+      - name: Create RDP User Account
         shell: pwsh
         run: |
           Write-Host "Creating default user: bilyabits"
@@ -44,15 +41,22 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           Write-Host "Restoring previous Tailscale state if exists..."
-          if (Test-Path "C:\ProgramData\Tailscale") { Remove-Item "C:\ProgramData\Tailscale" -Recurse -Force }
           try {
+            Write-Host "Stopping Tailscale service before restore..."
+            Stop-Service Tailscale -ErrorAction SilentlyContinue
+
+            if (Test-Path "C:\ProgramData\Tailscale") {
+              Write-Host "Removing old Tailscale data..."
+              Remove-Item "C:\ProgramData\Tailscale" -Recurse -Force
+            }
+
             gh run download --dir "C:\ProgramData\Tailscale"
             Write-Host "Tailscale state restored successfully."
           } catch {
             Write-Host "No previous Tailscale state found or unable to download."
           }
 
-      - name: Start Tailscale
+      - name: Start Tailscale Service and Authenticate
         shell: pwsh
         env:
           TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
@@ -60,12 +64,14 @@ jobs:
           Write-Host "Starting Tailscale..."
           Start-Service Tailscale
           & "C:\Program Files\Tailscale\tailscale.exe" up --authkey $env:TAILSCALE_AUTH_KEY --hostname bilyabits-runner --accept-routes --accept-dns=true
+          Write-Host "Tailscale started successfully."
+
           $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
-          Write-Host "Tailscale started successfully. IP: $ip"
+          Write-Host "Tailscale IP Address: $ip"
 
           $log = @"
           ===== RDP SESSION LOG =====
-          Version: 2.0.2
+          Version: 2.0.3
           Username: bilyabits
           Password: Cj123
           IP Address: $ip
@@ -75,23 +81,23 @@ jobs:
           $log | Out-File -FilePath "rdp-credentials.txt"
           Write-Host $log
 
-      - name: Compress and save Tailscale state
+      - name: Save Tailscale State
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           Write-Host "Saving Tailscale state..."
           Stop-Service Tailscale
           Compress-Archive -Path "C:\ProgramData\Tailscale" -DestinationPath "tailscale-state.zip" -Force
+          gh run upload-artifact --name "tailscale-state" --path "tailscale-state.zip"
           Start-Service Tailscale
           Write-Host "Tailscale state saved and service restarted."
 
-      - name: Upload Tailscale state
-        uses: actions/upload-artifact@v4
-        with:
-          name: tailscale-state
-          path: tailscale-state.zip
-
-      - name: Upload RDP credentials
-        uses: actions/upload-artifact@v4
-        with:
-          name: rdp-credentials
-          path: rdp-credentials.txt
+      - name: Auto Restart Workflow
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          Write-Host "Triggering auto restart..."
+          gh workflow run "BilyabitsRDP (Version 2.0.3)" --ref main
+          Write-Host "Workflow restart triggered successfully."
