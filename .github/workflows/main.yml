@@ -1,4 +1,4 @@
-name: BilyabitsRDP (Version 2.0.4)
+name: BilyabitsRDP (Version 2.0.5)
 
 on:
   workflow_dispatch:
@@ -43,19 +43,15 @@ jobs:
       - name: Restore Tailscale state if available
         shell: pwsh
         env:
-          GH_TOKEN: ${{ secrets.RESTART_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           Write-Host "Restoring previous Tailscale state if exists..."
           try {
-            Write-Host "Stopping Tailscale service before restore..."
             Stop-Service Tailscale -ErrorAction SilentlyContinue
-
             if (Test-Path "C:\ProgramData\Tailscale") {
-              Write-Host "Removing old Tailscale data..."
               Remove-Item "C:\ProgramData\Tailscale" -Recurse -Force
             }
-
-            gh run download --dir "C:\ProgramData\Tailscale"
+            gh run download --name "tailscale-state" --dir "C:\ProgramData\Tailscale" 2>$null
             Write-Host "Tailscale state restored successfully."
           } catch {
             Write-Host "No previous Tailscale state found or unable to download."
@@ -68,15 +64,20 @@ jobs:
         run: |
           Write-Host "Starting Tailscale..."
           Start-Service Tailscale
-          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey $env:TAILSCALE_AUTH_KEY --hostname bilyabits-runner --accept-routes --accept-dns=true
-          Write-Host "Tailscale started successfully."
+
+          # Prevent hanging by forcing non-interactive login
+          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey $env:TAILSCALE_AUTH_KEY --hostname "bilyabits-runner" --accept-routes --accept-dns=true --ssh=true --force-reauth --timeout 60
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Tailscale failed to authenticate non-interactively. Exiting with error."
+            exit 1
+          }
 
           $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
           Write-Host "Tailscale IP Address: $ip"
 
           $log = @"
           ===== RDP SESSION LOG =====
-          Version: 2.0.4
+          Version: 2.0.5
           Username: bilyabits
           Password: Cj123
           IP Address: $ip
@@ -86,10 +87,16 @@ jobs:
           $log | Out-File -FilePath "rdp-credentials.txt"
           Write-Host $log
 
+      - name: Upload RDP Credentials Log
+        uses: actions/upload-artifact@v4
+        with:
+          name: rdp-credentials
+          path: rdp-credentials.txt
+
       - name: Save Tailscale State
         shell: pwsh
         env:
-          GH_TOKEN: ${{ secrets.RESTART_TOKEN }}
+          GH_TOKEN: ${{ secrets.SECRET_TOKEN }}
         run: |
           Write-Host "Saving Tailscale state..."
           Stop-Service Tailscale
@@ -101,8 +108,8 @@ jobs:
       - name: Auto Restart Workflow
         shell: pwsh
         env:
-          GH_TOKEN: ${{ secrets.RESTART_TOKEN }}
+          GH_TOKEN: ${{ secrets.SECRET_TOKEN }}
         run: |
           Write-Host "Triggering auto restart..."
-          gh workflow run "BilyabitsRDP (Version 2.0.4)" --ref main
+          gh workflow run "BilyabitsRDP (Version 2.0.5)" --ref main
           Write-Host "Workflow restart triggered successfully."
