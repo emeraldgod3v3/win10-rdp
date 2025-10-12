@@ -1,4 +1,4 @@
-name: BilyabitsRDP (Version 2.0.5)
+name: BilyabitsRDP (Version 2.0.6)
 
 on:
   workflow_dispatch:
@@ -40,10 +40,10 @@ jobs:
           Start-Process -FilePath ".\tailscale-setup.exe" -ArgumentList "/quiet" -Wait
           Write-Host "Tailscale installed successfully."
 
-      - name: Restore Tailscale state if available
+      - name: Restore Tailscale State (if available)
         shell: pwsh
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.SECRET_TOKEN }}
         run: |
           Write-Host "Restoring previous Tailscale state if exists..."
           try {
@@ -54,7 +54,7 @@ jobs:
             gh run download --name "tailscale-state" --dir "C:\ProgramData\Tailscale" 2>$null
             Write-Host "Tailscale state restored successfully."
           } catch {
-            Write-Host "No previous Tailscale state found or unable to download."
+            Write-Host "No previous Tailscale state found or unable to download. Continuing..."
           }
 
       - name: Start Tailscale Service and Authenticate
@@ -65,8 +65,17 @@ jobs:
           Write-Host "Starting Tailscale..."
           Start-Service Tailscale
 
-          # Prevent hanging by forcing non-interactive login
-          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey $env:TAILSCALE_AUTH_KEY --hostname "bilyabits-runner" --accept-routes --accept-dns=true --ssh=true --force-reauth --timeout 60
+          # Force non-interactive auth and correct timeout duration (60s)
+          & "C:\Program Files\Tailscale\tailscale.exe" up `
+            --authkey $env:TAILSCALE_AUTH_KEY `
+            --hostname "bilyabits-runner" `
+            --accept-routes `
+            --accept-dns=true `
+            --ssh=true `
+            --force-reauth `
+            --timeout 60s `
+            --unattended
+
           if ($LASTEXITCODE -ne 0) {
             Write-Host "Tailscale failed to authenticate non-interactively. Exiting with error."
             exit 1
@@ -77,7 +86,7 @@ jobs:
 
           $log = @"
           ===== RDP SESSION LOG =====
-          Version: 2.0.5
+          Version: 2.0.6
           Username: bilyabits
           Password: Cj123
           IP Address: $ip
@@ -111,5 +120,5 @@ jobs:
           GH_TOKEN: ${{ secrets.SECRET_TOKEN }}
         run: |
           Write-Host "Triggering auto restart..."
-          gh workflow run "BilyabitsRDP (Version 2.0.5)" --ref main
+          gh workflow run "BilyabitsRDP (Version 2.0.6)" --ref main
           Write-Host "Workflow restart triggered successfully."
