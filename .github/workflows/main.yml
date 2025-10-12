@@ -1,4 +1,4 @@
-name: BilyabitsRDP (Version 1.9.1)
+name: BilyabitsRDP (Version 1.9.2)
 
 on:
   workflow_dispatch:
@@ -128,13 +128,15 @@ Password: $env:PASSWORD
               Start-Sleep -Seconds 3
               Compress-Archive -Path "$dir\*" -DestinationPath $zip -Force
               echo "ARCHIVE_PATH=$zip" >> $env:GITHUB_ENV
+
               if ($env:RESTART_TOKEN) {
-                $repo = "${{ github.repository }}"
-                $body = @{ ref = "${{ github.ref_name }}" } | ConvertTo-Json
+                $repo = $env:REPO
+                $ref = "${{ github.ref_name }}"
                 $headers = @{
                   Authorization = "Bearer $env:RESTART_TOKEN"
                   Accept = "application/vnd.github+json"
                 }
+                $body = @{ ref = $ref } | ConvertTo-Json
                 $url = "https://api.github.com/repos/$repo/actions/workflows/main.yml/dispatches"
                 Invoke-RestMethod -Uri $url -Method Post -Headers $headers -Body $body
               }
