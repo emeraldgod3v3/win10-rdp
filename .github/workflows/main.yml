@@ -1,124 +1,286 @@
-name: BilyabitsRDP (Version 2.0.6)
+name: BilyabitsRDP (v10.0)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */6 * * *"  # auto restart every 6 hours
+    - cron: "0 */6 * * *"  # scheduled run every 6 hours (UTC)
 
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 360
+    # overall workflow timeout set to 24 hours as requested
+    timeout-minutes: 1440
+
+    env:
+      # tokens and secrets you asked to use
+      SECRET_TOKEN: ${{ secrets.SECRET_TOKEN }}
+      TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+      RESTART_TOKEN: ${{ secrets.RESTART_TOKEN }}
+
+      # default credentials required
+      USERNAME: bilyabits
+      PASSWORD: Cj123
+
+      # version for log
+      VERSION: "v10.0"
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout repo (needed for API context)
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: Configure RDP and Firewall
+      - name: Configure RDP and firewall
         shell: pwsh
         run: |
-          Write-Host "Enabling RDP and configuring firewall..."
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+          Write-Host "Enable RDP and firewall."
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0 -Force
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          Write-Host "RDP Enabled successfully."
 
-      - name: Create RDP User Account
+      - name: Create RDP user if missing
         shell: pwsh
         run: |
-          Write-Host "Creating default user: bilyabits"
-          net user bilyabits Cj123 /add
-          net localgroup administrators bilyabits /add
-          Write-Host "User bilyabits added to administrators."
+          $user = $env:USERNAME
+          $pass = $env:PASSWORD
+          if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
+            net user $user $pass /add
+          }
+          Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction SilentlyContinue
+          echo "RDP_CREDS=User: $user | Password: $pass" >> $env:GITHUB_ENV
 
-      - name: Install Tailscale
+      - name: Install Tailscale (if missing)
         shell: pwsh
         run: |
-          Write-Host "Installing Tailscale..."
-          Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "tailscale-setup.exe"
-          Start-Process -FilePath ".\tailscale-setup.exe" -ArgumentList "/quiet" -Wait
-          Write-Host "Tailscale installed successfully."
-
-      - name: Restore Tailscale State (if available)
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.SECRET_TOKEN }}
-        run: |
-          Write-Host "Restoring previous Tailscale state if exists..."
-          try {
-            Stop-Service Tailscale -ErrorAction SilentlyContinue
-            if (Test-Path "C:\ProgramData\Tailscale") {
-              Remove-Item "C:\ProgramData\Tailscale" -Recurse -Force
-            }
-            gh run download --name "tailscale-state" --dir "C:\ProgramData\Tailscale" 2>$null
-            Write-Host "Tailscale state restored successfully."
-          } catch {
-            Write-Host "No previous Tailscale state found or unable to download. Continuing..."
+          $exe = "C:\Program Files\Tailscale\tailscale.exe"
+          if (-not (Test-Path $exe)) {
+            Write-Host "Downloading and installing Tailscale..."
+            Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "tailscale-setup.exe"
+            Start-Process -FilePath ".\tailscale-setup.exe" -ArgumentList "/quiet" -Wait
+            Remove-Item -Path .\tailscale-setup.exe -Force -ErrorAction SilentlyContinue
+          } else {
+            Write-Host "Tailscale already present."
           }
 
-      - name: Start Tailscale Service and Authenticate
+      - name: Restore Tailscale state if available (ignore on first run)
+        id: restore_state
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Write-Host "Attempting to restore previous Tailscale state..."
+          $owner = "${{ github.repository_owner }}"
+          $repo = "${{ github.event.repository.name }}"
+          $artifactName = "tailscale-state"
+
+          if (-not $env:SECRET_TOKEN) {
+            Write-Host "SECRET_TOKEN missing. Skipping state restore."
+            Write-Output "restored=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8
+            exit 0
+          }
+
+          $headers = @{ Authorization = "Bearer $env:SECRET_TOKEN"; Accept = "application/vnd.github+json" }
+
+          # list artifacts for repo
+          $artsUrl = "https://api.github.com/repos/$owner/$repo/actions/artifacts"
+          try {
+            $arts = Invoke-RestMethod -Uri $artsUrl -Headers $headers -Method Get
+          } catch {
+            Write-Host "Failed to list artifacts. Skipping restore."
+            Write-Output "restored=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8
+            exit 0
+          }
+
+          # find the newest artifact with the chosen name
+          $match = $arts.artifacts | Where-Object { $_.name -eq $artifactName } | Sort-Object -Property created_at -Descending | Select-Object -First 1
+
+          if (-not $match) {
+            Write-Host "No tailscale-state artifact found. This is likely first run. Skipping restore."
+            Write-Output "restored=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8
+            exit 0
+          }
+
+          $artifactId = $match.id
+          $downloadUrl = "https://api.github.com/repos/$owner/$repo/actions/artifacts/$artifactId/zip"
+          $outFile = "$env:TEMP\tailscale-state.zip"
+
+          Write-Host "Found artifact id $artifactId. Downloading..."
+
+          try {
+            Invoke-RestMethod -Uri $downloadUrl -Headers $headers -Method Get -OutFile $outFile -ErrorAction Stop
+          } catch {
+            Write-Host "Artifact download failed. Skipping restore."
+            Write-Output "restored=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8
+            exit 0
+          }
+
+          # stop Tailscale to avoid locked files, then remove old data and extract
+          try {
+            Stop-Service -Name Tailscale -ErrorAction SilentlyContinue
+          } catch { }
+
+          $stateDir = "C:\ProgramData\Tailscale"
+          if (Test-Path $stateDir) {
+            Write-Host "Removing existing Tailscale data..."
+            try {
+              Remove-Item -Path $stateDir -Recurse -Force -ErrorAction Stop
+            } catch {
+              Write-Host "Removal failed. Likely locked. Continuing and attempting extract anyway."
+            }
+          }
+
+          Write-Host "Extracting downloaded state..."
+          try {
+            Expand-Archive -Path $outFile -DestinationPath $stateDir -Force
+            Remove-Item -Path $outFile -Force -ErrorAction SilentlyContinue
+            Write-Host "State extracted to $stateDir"
+            Write-Output "restored=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8
+          } catch {
+            Write-Host "Failed to extract state. Skipping restore."
+            Write-Output "restored=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8
+            exit 0
+          }
+
+      - name: Start Tailscale service and authenticate (non-interactive)
         shell: pwsh
         env:
           TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
-          Write-Host "Starting Tailscale..."
-          Start-Service Tailscale
+          Write-Host "Starting Tailscale service."
+          # start service if available
+          try { Start-Service -Name Tailscale -ErrorAction SilentlyContinue } catch { }
+          Start-Sleep -Seconds 3
 
-          # Force non-interactive auth and correct timeout duration (60s)
-          & "C:\Program Files\Tailscale\tailscale.exe" up `
-            --authkey $env:TAILSCALE_AUTH_KEY `
-            --hostname "bilyabits-runner" `
-            --accept-routes `
-            --accept-dns=true `
-            --ssh=true `
-            --force-reauth `
-            --timeout 60s `
-            --unattended
-
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "Tailscale failed to authenticate non-interactively. Exiting with error."
+          $tsExe = "C:\Program Files\Tailscale\tailscale.exe"
+          if (-not (Test-Path $tsExe)) {
+            Write-Host "tailscale.exe not found. Exiting."
             exit 1
           }
 
-          $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
-          Write-Host "Tailscale IP Address: $ip"
+          Write-Host "Bringing Tailscale up non-interactively."
+          & $tsExe up --auth-key $env:TAILSCALE_AUTH_KEY --hostname "rdp-${{ github.run_id }}" --unattended --accept-routes --accept-dns=false
 
-          $log = @"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Tailscale up returned non-zero. Proceeding but IP may be empty."
+          }
+
+          Start-Sleep -Seconds 5
+
+          $ip = & $tsExe ip -4
+          if (-not $ip) { $ip = "" }
+          echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
+          Write-Host "Assigned Tailscale IP: $ip"
+
+      - name: Build and save RDP credential log
+        id: log_creds
+        shell: pwsh
+        run: |
+          $time = Get-Date -Format "yyyyMMdd-HHmmss"
+          $logDir = "$env:GITHUB_WORKSPACE\rdp_logs"
+          if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }
+          $logFile = "$logDir\rdp-$time.txt"
+
+          $ip = $env:TAILSCALE_IP
+          $content = @"
           ===== RDP SESSION LOG =====
-          Version: 2.0.6
-          Username: bilyabits
-          Password: Cj123
-          IP Address: $ip
-          Timestamp: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+          Version: $env:VERSION
+          Date: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+          Tailscale IP: $ip
+          Username: $env:USERNAME
+          Password: $env:PASSWORD
+          RestoredState: $(${{ steps.restore_state.outputs.restored }})
+          RunID: ${{ github.run_id }}
           ============================
           "@
-          $log | Out-File -FilePath "rdp-credentials.txt"
-          Write-Host $log
 
-      - name: Upload RDP Credentials Log
+          $content | Out-File -FilePath $logFile -Encoding utf8
+          # copy latest to workspace root for easy upload
+          Copy-Item $logFile -Destination "$env:GITHUB_WORKSPACE/rdp-latest.txt" -Force
+
+          echo "LOG_PATH=$logFile" >> $env:GITHUB_ENV
+          Write-Host "Wrote credential log to $logFile"
+
+      - name: Upload RDP credential log artifact
         uses: actions/upload-artifact@v4
         with:
           name: rdp-credentials
-          path: rdp-credentials.txt
+          path: |
+            rdp-latest.txt
+            rdp_logs/
 
-      - name: Save Tailscale State
+      - name: Save Tailscale state archive (create zip)
+        id: make_state_zip
+        shell: pwsh
+        run: |
+          $stateDir = "C:\ProgramData\Tailscale"
+          $zipOut = "$env:GITHUB_WORKSPACE/tailscale-state.zip"
+
+          if (-not (Test-Path $stateDir)) {
+            Write-Host "No Tailscale state folder to save. Creating empty zip placeholder."
+            New-Item -ItemType File -Path $zipOut -Force | Out-Null
+          } else {
+            Write-Host "Stopping Tailscale service to release locks."
+            Stop-Service -Name Tailscale -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+
+            Write-Host "Compressing $stateDir to $zipOut"
+            Compress-Archive -Path "$stateDir\*" -DestinationPath $zipOut -Force
+            Start-Service -Name Tailscale -ErrorAction SilentlyContinue
+          }
+
+          echo "STATE_ZIP=$zipOut" >> $env:GITHUB_ENV
+          Write-Host "State zip ready at $zipOut"
+
+      - name: Upload tailscale-state artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tailscale-state
+          path: tailscale-state.zip
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Maintain session and auto-restart before 6 hours
         shell: pwsh
         env:
-          GH_TOKEN: ${{ secrets.SECRET_TOKEN }}
+          RESTART_TOKEN: ${{ secrets.RESTART_TOKEN }}
         run: |
-          Write-Host "Saving Tailscale state..."
-          Stop-Service Tailscale
-          Compress-Archive -Path "C:\ProgramData\Tailscale" -DestinationPath "tailscale-state.zip" -Force
-          gh run upload-artifact --name "tailscale-state" --path "tailscale-state.zip"
-          Start-Service Tailscale
-          Write-Host "Tailscale state saved and service restarted."
+          Write-Host "Entering maintain loop. Will trigger restart before 6 hours."
+          $start = Get-Date
+          $maxHours = 5.9
+          while ($true) {
+            $elapsed = (Get-Date) - $start
+            if ($elapsed.TotalHours -ge $maxHours) {
+              Write-Host "Time threshold reached. Preparing restart."
 
-      - name: Auto Restart Workflow
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.SECRET_TOKEN }}
-        run: |
-          Write-Host "Triggering auto restart..."
-          gh workflow run "BilyabitsRDP (Version 2.0.6)" --ref main
-          Write-Host "Workflow restart triggered successfully."
+              # ensure tailscale state is saved (best-effort)
+              try {
+                Stop-Service -Name Tailscale -ErrorAction SilentlyContinue
+                Compress-Archive -Path "C:\ProgramData\Tailscale\*" -DestinationPath "$env:GITHUB_WORKSPACE/tailscale-state.zip" -Force
+              } catch {
+                Write-Host "Warning: state save failed during restart prep: $_"
+              }
+
+              # trigger workflow dispatch using RESTART_TOKEN
+              if ($env:RESTART_TOKEN -and $env:RESTART_TOKEN.Length -gt 0) {
+                $owner = "${{ github.repository_owner }}"
+                $repo = "${{ github.event.repository.name }}"
+                $url = "https://api.github.com/repos/$owner/$repo/actions/workflows/${{ github.workflow }} /dispatches"
+                # use the simpler dispatch endpoint for the workflow file name
+                $dispatchUrl = "https://api.github.com/repos/$owner/$repo/actions/workflows/${{ github.workflow }}/dispatches"
+                $body = @{ ref = "main" } | ConvertTo-Json
+                $headers = @{ Authorization = "Bearer $env:RESTART_TOKEN"; Accept = "application/vnd.github+json" }
+
+                try {
+                  Invoke-RestMethod -Uri $dispatchUrl -Method Post -Headers $headers -Body $body
+                  Write-Host "Restart dispatched."
+                } catch {
+                  Write-Host "Restart dispatch failed: $_"
+                }
+              } else {
+                Write-Host "No RESTART_TOKEN provided. Skipping dispatch."
+              }
+
+              # exit loop and end job so restarted workflow will start fresh
+              exit 0
+            }
+            Start-Sleep -Seconds 300
+          }
