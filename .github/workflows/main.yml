@@ -1,26 +1,34 @@
-name: BilyabitsRDP (Version 1.9.8)
+name: BilyabitsRDP (Version 1.9.9)
 
 on:
-  schedule:
-    - cron: "0 */6 * * *" # Auto restart every 6 hours
   workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"  # auto restart every 6 hours
 
 jobs:
   secure-rdp:
     runs-on: windows-latest
     timeout-minutes: 360
-    env:
-      GH_TOKEN: ${{ secrets.RESTART_TOKEN }}
-      TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
 
     steps:
-      - name: Configure Core RDP Settings
+      - name: Configure RDP and Firewall
+        shell: pwsh
         run: |
-          Write-Host "Enabling RDP and configuring policies..."
+          Write-Host "Enabling RDP and configuring firewall..."
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Write-Host "RDP Enabled successfully."
+
+      - name: Create RDP User Account
+        shell: pwsh
+        run: |
+          Write-Host "Creating default user: bilyabits"
+          net user bilyabits Cj123 /add
+          net localgroup administrators bilyabits /add
+          Write-Host "User bilyabits added to administrators."
 
       - name: Install Tailscale
+        shell: pwsh
         run: |
           Write-Host "Installing Tailscale..."
           Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "tailscale-setup.exe"
@@ -28,69 +36,59 @@ jobs:
           Write-Host "Tailscale installed successfully."
 
       - name: Restore Tailscale State (if available)
-        continue-on-error: true
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.RESTART_TOKEN }}
         run: |
-          Write-Host "Attempting to restore previous Tailscale state..."
-          Write-Host "Checking for existing tailscale-state artifact..."
-          gh run download --name tailscale-state --dir "C:\ProgramData\Tailscale" || Write-Host "No previous state found, skipping restore."
+          Write-Host "Restoring previous Tailscale state if exists..."
+          try {
+            gh run download --name tailscale-state --dir "C:\ProgramData\Tailscale"
+            Write-Host "Tailscale state restored."
+          } catch {
+            Write-Host "No previous Tailscale state found. Continuing..."
+          }
 
-      - name: Start Tailscale
+      - name: Start Tailscale Service and Authenticate
+        shell: pwsh
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
-          Write-Host "Starting Tailscale and authenticating..."
+          Write-Host "Starting Tailscale..."
           Start-Service Tailscale
-          tailscale up --authkey $env:TAILSCALE_AUTH_KEY --hostname bilyabits-runner --accept-routes --accept-dns=true --ssh=true
+          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey $env:TAILSCALE_AUTH_KEY --hostname bilyabits-runner --accept-routes --accept-dns=true --ssh=true
           Write-Host "Tailscale started successfully."
-          Write-Host "Fetching assigned IP address..."
-          $ip = tailscale ip -4
+
+          $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
           Write-Host "Tailscale IP Address: $ip"
 
-      - name: Create RDP User (bilyabits)
-        run: |
-          Write-Host "Creating or updating RDP user account..."
-          $username = "bilyabits"
-          $password = "Cj123"
-          if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
-            Write-Host "User already exists. Updating password..."
-            net user $username $password
-          } else {
-            Write-Host "User not found. Creating user..."
-            net user $username $password /add
-            net localgroup administrators $username /add
-          }
-          Write-Host "User setup complete."
-
-      - name: Log RDP Credentials
-        run: |
-          Write-Host "===== RDP CREDENTIALS ====="
-          Write-Host "Username: bilyabits"
-          Write-Host "Password: Cj123"
-          $ip = (tailscale ip -4)
-          Write-Host "RDP Address: $ip"
-          Write-Host "============================"
-          Write-Host "Store these credentials temporarily for your remote session."
+          $log = @"
+          ===== RDP SESSION LOG =====
+          Version: 1.9.9
+          Username: bilyabits
+          Password: Cj123
+          IP Address: $ip
+          Timestamp: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+          ============================
+          "@
+          $log | Out-File -FilePath "rdp-credentials.txt"
+          Write-Host $log
 
       - name: Save Tailscale State
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.RESTART_TOKEN }}
         run: |
-          Write-Host "Preparing to save Tailscale state..."
-          Write-Host "Stopping Tailscale service to release file locks..."
-          Stop-Service Tailscale -Force
-          Start-Sleep -Seconds 3
+          Write-Host "Saving Tailscale state..."
+          Stop-Service Tailscale
           Compress-Archive -Path "C:\ProgramData\Tailscale" -DestinationPath "tailscale-state.zip" -Force
-          Write-Host "Uploading Tailscale state..."
-          gh upload-artifact tailscale-state.zip --name tailscale-state
-          Write-Host "Tailscale state uploaded successfully."
-          Write-Host "Restarting Tailscale service..."
-          Start-Service Tailscale
-          Write-Host "Tailscale service restarted."
+          gh run upload-artifact --name tailscale-state tailscale-state.zip
+          Write-Host "State saved successfully."
 
       - name: Auto Restart Workflow
-        if: always()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.RESTART_TOKEN }}
         run: |
           Write-Host "Triggering auto restart..."
-          gh workflow run "BilyabitsRDP (Version 1.9.8)" --ref main
+          gh workflow run "BilyabitsRDP (Version 1.9.9)" --ref main
           Write-Host "Workflow restart triggered successfully."
-
-      - name: Keep Session Alive
-        run: |
-          Write-Host "RDP session ready. Workflow will auto-restart every 6 hours."
-          Start-Sleep -Seconds 21600 # 6 hours
