@@ -1,4 +1,4 @@
-name: BilyabitsRDP (Version 1.9.0)
+name: BilyabitsRDP (Version 1.9.1)
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ jobs:
     timeout-minutes: 360
 
     env:
-      USERNAME: carljohnvillavito
+      USERNAME: bilyabits
       PASSWORD: Cj123
       TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
       RESTART_TOKEN: ${{ secrets.RESTART_TOKEN }}
@@ -88,17 +88,32 @@ jobs:
           $ip = & $ts ip -4
           echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
 
-      - name: Save RDP info
+      - name: Save and log RDP info
         run: |
-          $text = "RDP_IP=$env:TAILSCALE_IP`nUSERNAME=$env:USERNAME`nPASSWORD=$env:PASSWORD"
-          $text | Out-File -FilePath rdp-info.txt -Encoding utf8
+          $time = Get-Date -Format "yyyyMMdd-HHmmss"
+          $logDir = "C:\RDP_Logs"
+          if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }
+          $logFile = "$logDir\rdp-session-$time.txt"
+          $content = @"
+RDP Session Log
+=====================
+Date/Time: $time
+Tailscale IP: $env:TAILSCALE_IP
+Username: $env:USERNAME
+Password: $env:PASSWORD
+=====================
+"@
+          $content | Out-File -FilePath $logFile -Encoding utf8
+          Copy-Item $logFile -Destination "$env:GITHUB_WORKSPACE\rdp-latest.txt" -Force
 
-      - name: Upload RDP info
+      - name: Upload latest RDP log
         uses: actions/upload-artifact@v4
         with:
-          name: rdp-info
-          path: rdp-info.txt
-          retention-days: 1
+          name: rdp-logs
+          path: |
+            rdp-latest.txt
+            C:\RDP_Logs\
+          retention-days: 3
 
       - name: Maintain and auto restart before 6 hours
         run: |
@@ -135,4 +150,4 @@ jobs:
           name: tailscale-state
           path: C:\tailscale-state.zip
           if-no-files-found: warn
-          retention-days: 1
+          retention-days: 3
