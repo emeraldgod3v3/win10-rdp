@@ -1,4 +1,4 @@
-name: BilyabitsRDP (Version 1.9.9)
+name: BilyabitsRDP (Version 2.0.0)
 
 on:
   workflow_dispatch:
@@ -41,12 +41,13 @@ jobs:
           GH_TOKEN: ${{ secrets.RESTART_TOKEN }}
         run: |
           Write-Host "Restoring previous Tailscale state if exists..."
-          try {
-            gh run download --name tailscale-state --dir "C:\ProgramData\Tailscale"
-            Write-Host "Tailscale state restored."
-          } catch {
-            Write-Host "No previous Tailscale state found. Continuing..."
+          $restore = Start-Process -FilePath "gh" -ArgumentList "run", "download", "--name", "tailscale-state", "--dir", "C:\ProgramData\Tailscale" -NoNewWindow -PassThru -Wait
+          if ($restore.ExitCode -ne 0) {
+            Write-Host "No previous Tailscale state found or runner not in git context. Continuing..."
+          } else {
+            Write-Host "Tailscale state restored successfully."
           }
+          exit 0
 
       - name: Start Tailscale Service and Authenticate
         shell: pwsh
@@ -63,7 +64,7 @@ jobs:
 
           $log = @"
           ===== RDP SESSION LOG =====
-          Version: 1.9.9
+          Version: 1.9.9a
           Username: bilyabits
           Password: Cj123
           IP Address: $ip
@@ -90,5 +91,5 @@ jobs:
           GH_TOKEN: ${{ secrets.RESTART_TOKEN }}
         run: |
           Write-Host "Triggering auto restart..."
-          gh workflow run "BilyabitsRDP (Version 1.9.9)" --ref main
+          gh workflow run "BilyabitsRDP (Version 1.9.9a)" --ref main
           Write-Host "Workflow restart triggered successfully."
