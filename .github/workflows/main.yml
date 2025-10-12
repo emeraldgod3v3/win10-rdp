@@ -41,13 +41,12 @@ jobs:
           GH_TOKEN: ${{ secrets.RESTART_TOKEN }}
         run: |
           Write-Host "Restoring previous Tailscale state if exists..."
-          $restore = Start-Process -FilePath "gh" -ArgumentList "run", "download", "--name", "tailscale-state", "--dir", "C:\ProgramData\Tailscale" -NoNewWindow -PassThru -Wait
-          if ($restore.ExitCode -ne 0) {
-            Write-Host "No previous Tailscale state found or runner not in git context. Continuing..."
-          } else {
+          try {
+            gh run download --name "tailscale-state" --dir "C:\ProgramData\Tailscale"
             Write-Host "Tailscale state restored successfully."
+          } catch {
+            Write-Host "No previous Tailscale state found or runner not in git context. Continuing..."
           }
-          exit 0
 
       - name: Start Tailscale Service and Authenticate
         shell: pwsh
@@ -56,21 +55,21 @@ jobs:
         run: |
           Write-Host "Starting Tailscale..."
           Start-Service Tailscale
-          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey $env:TAILSCALE_AUTH_KEY --hostname bilyabits-runner --accept-routes --accept-dns=true --ssh=true
+          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey $env:TAILSCALE_AUTH_KEY --hostname bilyabits-runner --accept-routes --accept-dns=true
           Write-Host "Tailscale started successfully."
 
           $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
           Write-Host "Tailscale IP Address: $ip"
 
           $log = @"
-          ===== RDP SESSION LOG =====
-          Version: 1.9.9a
-          Username: bilyabits
-          Password: Cj123
-          IP Address: $ip
-          Timestamp: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-          ============================
-          "@
+===== RDP SESSION LOG =====
+Version: 2.0.0
+Username: bilyabits
+Password: Cj123
+IP Address: $ip
+Timestamp: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+============================
+"@
           $log | Out-File -FilePath "rdp-credentials.txt"
           Write-Host $log
 
@@ -82,8 +81,9 @@ jobs:
           Write-Host "Saving Tailscale state..."
           Stop-Service Tailscale
           Compress-Archive -Path "C:\ProgramData\Tailscale" -DestinationPath "tailscale-state.zip" -Force
-          gh run upload-artifact --name tailscale-state tailscale-state.zip
-          Write-Host "State saved successfully."
+          gh run upload-artifact --name "tailscale-state" --path "tailscale-state.zip"
+          Start-Service Tailscale
+          Write-Host "Tailscale state saved and service restarted."
 
       - name: Auto Restart Workflow
         shell: pwsh
@@ -91,5 +91,5 @@ jobs:
           GH_TOKEN: ${{ secrets.RESTART_TOKEN }}
         run: |
           Write-Host "Triggering auto restart..."
-          gh workflow run "BilyabitsRDP (Version 1.9.9a)" --ref main
+          gh workflow run "BilyabitsRDP (Version 2.0.0)" --ref main
           Write-Host "Workflow restart triggered successfully."
