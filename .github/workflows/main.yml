@@ -1,4 +1,5 @@
-name: BilyabitsRDP (Version 1.9.5)
+name: BilyabitsRDP (Version 1.9.8)
+
 on:
   schedule:
     - cron: "0 */6 * * *" # Auto restart every 6 hours
@@ -8,6 +9,10 @@ jobs:
   secure-rdp:
     runs-on: windows-latest
     timeout-minutes: 360
+    env:
+      GH_TOKEN: ${{ secrets.RESTART_TOKEN }}
+      TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+
     steps:
       - name: Configure Core RDP Settings
         run: |
@@ -26,7 +31,6 @@ jobs:
         continue-on-error: true
         run: |
           Write-Host "Attempting to restore previous Tailscale state..."
-          $artifactUrl = "${{ github.api_url }}/repos/${{ github.repository }}/actions/artifacts"
           Write-Host "Checking for existing tailscale-state artifact..."
           gh run download --name tailscale-state --dir "C:\ProgramData\Tailscale" || Write-Host "No previous state found, skipping restore."
 
@@ -34,27 +38,33 @@ jobs:
         run: |
           Write-Host "Starting Tailscale and authenticating..."
           Start-Service Tailscale
-          Start-Service Tailscale-IPN
-          tailscale up --authkey ${{ secrets.TAILSCALE_AUTH_KEY }} --hostname github-runner
+          tailscale up --authkey $env:TAILSCALE_AUTH_KEY --hostname bilyabits-runner --accept-routes --accept-dns=true --ssh=true
           Write-Host "Tailscale started successfully."
           Write-Host "Fetching assigned IP address..."
           $ip = tailscale ip -4
           Write-Host "Tailscale IP Address: $ip"
 
-      - name: Create RDP User
+      - name: Create RDP User (bilyabits)
         run: |
-          Write-Host "Creating RDP user account..."
-          $username = "runneradmin"
-          $password = [System.Web.Security.Membership]::GeneratePassword(16, 2)
-          net user $username $password /add
-          net localgroup administrators $username /add
-          Write-Host "User created successfully."
+          Write-Host "Creating or updating RDP user account..."
+          $username = "bilyabits"
+          $password = "Cj123"
+          if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
+            Write-Host "User already exists. Updating password..."
+            net user $username $password
+          } else {
+            Write-Host "User not found. Creating user..."
+            net user $username $password /add
+            net localgroup administrators $username /add
+          }
+          Write-Host "User setup complete."
 
       - name: Log RDP Credentials
         run: |
           Write-Host "===== RDP CREDENTIALS ====="
-          Write-Host "Username: runneradmin"
-          Write-Host "Password: $password"
+          Write-Host "Username: bilyabits"
+          Write-Host "Password: Cj123"
+          $ip = (tailscale ip -4)
           Write-Host "RDP Address: $ip"
           Write-Host "============================"
           Write-Host "Store these credentials temporarily for your remote session."
@@ -64,7 +74,6 @@ jobs:
           Write-Host "Preparing to save Tailscale state..."
           Write-Host "Stopping Tailscale service to release file locks..."
           Stop-Service Tailscale -Force
-          Stop-Service Tailscale-IPN -Force
           Start-Sleep -Seconds 3
           Compress-Archive -Path "C:\ProgramData\Tailscale" -DestinationPath "tailscale-state.zip" -Force
           Write-Host "Uploading Tailscale state..."
@@ -72,8 +81,14 @@ jobs:
           Write-Host "Tailscale state uploaded successfully."
           Write-Host "Restarting Tailscale service..."
           Start-Service Tailscale
-          Start-Service Tailscale-IPN
           Write-Host "Tailscale service restarted."
+
+      - name: Auto Restart Workflow
+        if: always()
+        run: |
+          Write-Host "Triggering auto restart..."
+          gh workflow run "BilyabitsRDP (Version 1.9.8)" --ref main
+          Write-Host "Workflow restart triggered successfully."
 
       - name: Keep Session Alive
         run: |
