@@ -1,14 +1,14 @@
-name: RDP Persistent Session
+name: BilyabitsRDP (Version 1.9.0)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */6 * * *"  # backup trigger every 6 hours (UTC)
+    - cron: "0 */6 * * *"  # every 6 hours UTC
 
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 360    # GitHub max 6 hours per job
+    timeout-minutes: 360
 
     env:
       USERNAME: carljohnvillavito
@@ -18,44 +18,43 @@ jobs:
       REPO: ${{ github.repository }}
 
     steps:
-      - name: Configure RDP and firewall
+      - name: Enable RDP and firewall
         run: |
-          Write-Host "Configuring RDP..."
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          netsh advfirewall firewall delete rule name="RDP-Tailscale" > $null 2>&1
-          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 0 -Force
+          netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
 
-      - name: Create RDP user (persistent)
+      - name: Create RDP user
         run: |
           $user = $env:USERNAME
-          $passPlain = $env:PASSWORD
-          $secure = ConvertTo-SecureString $passPlain -AsPlainText -Force
+          $pass = ConvertTo-SecureString $env:PASSWORD -AsPlainText -Force
           if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
-            New-LocalUser -Name $user -Password $secure -AccountNeverExpires
+            New-LocalUser -Name $user -Password $pass -AccountNeverExpires
           }
           Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction SilentlyContinue
-          echo "RDP_CREDS=User: $user | Password: $passPlain" >> $env:GITHUB_ENV
 
-      - name: Install Tailscale if missing
+      - name: Install Tailscale
         run: |
-          $tsExe = "C:\Program Files\Tailscale\tailscale.exe"
-          if (-not (Test-Path $tsExe)) {
-            Write-Host "Downloading and installing Tailscale..."
+          $exe = "C:\Program Files\Tailscale\tailscale.exe"
+          if (-not (Test-Path $exe)) {
             $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
-            $out = "$env:TEMP\tailscale.msi"
-            Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing
-            Start-Process msiexec.exe -ArgumentList "/i", "`"$out`"", "/quiet", "/norestart" -Wait
-            Remove-Item $out -Force
-          } else { Write-Host "Tailscale already installed." }
+            $msi = "$env:TEMP\tailscale.msi"
+            Invoke-WebRequest -Uri $url -OutFile $msi -UseBasicParsing
+            Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /quiet /norestart" -Wait
+            Remove-Item $msi -Force
+          }
 
-      - name: Skip download on first run (mark)
-        id: first_check
+      - name: Detect first run
+        id: check_first
         run: |
-          if ($env:GITHUB_RUN_NUMBER -gt 1) { echo "has_prev=true" >> $env:GITHUB_ENV } else { echo "has_prev=false" >> $env:GITHUB_ENV }
+          if ($env:GITHUB_RUN_NUMBER -gt 1) {
+            echo "has_prev=true" >> $env:GITHUB_ENV
+          } else {
+            echo "has_prev=false" >> $env:GITHUB_ENV
+          }
 
-      - name: Download previous Tailscale state (only if previous run exists)
+      - name: Download previous Tailscale state
         if: env.has_prev == 'true'
         continue-on-error: true
         uses: actions/download-artifact@v4
@@ -63,158 +62,77 @@ jobs:
           name: tailscale-state
           path: C:\ProgramData\Tailscale
 
-      - name: Restore state archive (if present)
+      - name: Restore previous state
         if: env.has_prev == 'true'
         run: |
           $zip = "C:\ProgramData\Tailscale\tailscale-state.zip"
           if (Test-Path $zip) {
-            Write-Host "Extracting archived state..."
             Expand-Archive -Path $zip -DestinationPath "C:\ProgramData\Tailscale" -Force
             Remove-Item $zip -Force
-            Write-Host "State restored."
-          } else {
-            Write-Host "No archived state file present."
           }
 
       - name: Start or register Tailscale
         run: |
           $ts = "C:\Program Files\Tailscale\tailscale.exe"
-          $stateFile = "C:\ProgramData\Tailscale\tailscaled.state"
-
-          if (Test-Path $stateFile) {
-            Write-Host "Found existing tailscaled.state. Bringing Tailscale up using restored identity..."
+          $state = "C:\ProgramData\Tailscale\tailscaled.state"
+          if (Test-Path $state) {
             & $ts up --unattended --accept-dns=false
           } else {
             if (-not $env:TAILSCALE_AUTH_KEY) {
-              Write-Error "TAILSCALE_AUTH_KEY missing. Aborting."
+              Write-Error "Missing TAILSCALE_AUTH_KEY"
               exit 1
             }
-            Write-Host "No state found. Registering node with persistent auth key..."
             & $ts up --auth-key=$env:TAILSCALE_AUTH_KEY --unattended --accept-dns=false
           }
-
-          Start-Sleep -Seconds 8
+          Start-Sleep -Seconds 5
           $ip = & $ts ip -4
-          if (-not $ip) {
-            Write-Error "No Tailscale IP assigned. Exiting."
-            exit 1
-          }
-          Write-Host "TAILSCALE_IP: $ip"
           echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
 
-      - name: Verify RDP port reachable
+      - name: Save RDP info
         run: |
-          $ip = $env:TAILSCALE_IP
-          Write-Host "Testing RDP port on $ip..."
-          $res = Test-NetConnection -ComputerName $ip -Port 3389 -WarningAction SilentlyContinue
-          if (-not $res.TcpTestSucceeded) {
-            Write-Error "TCP 3389 unreachable on $ip"
-            exit 1
-          }
-          Write-Host "RDP reachable on $ip"
+          $text = "RDP_IP=$env:TAILSCALE_IP`nUSERNAME=$env:USERNAME`nPASSWORD=$env:PASSWORD"
+          $text | Out-File -FilePath rdp-info.txt -Encoding utf8
 
-      - name: Publish RDP info artifact
-        run: |
-          $info = @"
-RDP_IP=$env:TAILSCALE_IP
-USERNAME=$env:USERNAME
-PASSWORD=$env:PASSWORD
-"@
-          $out = "rdp-info.txt"
-          $info | Out-File -FilePath $out -Encoding utf8
-        uses: actions/upload-artifact@v4
-        # note: cannot mix run and uses; we upload in next step
-
-      - name: Upload rdp-info artifact
+      - name: Upload RDP info
         uses: actions/upload-artifact@v4
         with:
           name: rdp-info
           path: rdp-info.txt
           retention-days: 1
 
-      - name: Maintain session and trigger restart
+      - name: Maintain and auto restart before 6 hours
         run: |
           $start = Get-Date
-          $tsExe = "C:\Program Files\Tailscale\tailscale.exe"
           while ($true) {
             $elapsed = (Get-Date) - $start
-            Write-Host "Uptime minutes: $([int]$elapsed.TotalMinutes)"
             if ($elapsed.TotalHours -ge 5.9) {
-              Write-Host "Reached 5.9 hours. Preparing to restart workflow."
-
-              # stop tailscale to release locks and create archive
-              if (Get-Service -Name Tailscale -ErrorAction SilentlyContinue) {
-                Stop-Service -Name Tailscale -Force -ErrorAction SilentlyContinue
-                Start-Sleep -Seconds 3
-              } else {
-                Write-Host "Tailscale service not present. Proceeding."
-              }
-
-              $stateDir = "C:\ProgramData\Tailscale"
-              $archive = "C:\tailscale-state.zip"
-              if (Test-Path $stateDir) {
-                Compress-Archive -Path "$stateDir\*" -DestinationPath $archive -Force
-                Write-Host "State archived to $archive"
-              } else {
-                Write-Host "No state dir to archive."
-              }
-
-              # upload archive artifact using upload action step following this run
-              echo "ARCHIVE_PATH=$archive" >> $env:GITHUB_ENV
-
-              # trigger a new run via REST if RESTART_TOKEN present
+              Write-Host "Saving Tailscale state before restart..."
+              $dir = "C:\ProgramData\Tailscale"
+              $zip = "C:\tailscale-state.zip"
+              Stop-Service -Name Tailscale -Force -ErrorAction SilentlyContinue
+              Start-Sleep -Seconds 3
+              Compress-Archive -Path "$dir\*" -DestinationPath $zip -Force
+              echo "ARCHIVE_PATH=$zip" >> $env:GITHUB_ENV
               if ($env:RESTART_TOKEN) {
                 $repo = "${{ github.repository }}"
                 $body = @{ ref = "${{ github.ref_name }}" } | ConvertTo-Json
                 $headers = @{
                   Authorization = "Bearer $env:RESTART_TOKEN"
                   Accept = "application/vnd.github+json"
-                  "User-Agent" = "github-actions"
                 }
                 $url = "https://api.github.com/repos/$repo/actions/workflows/main.yml/dispatches"
-                try {
-                  Invoke-RestMethod -Uri $url -Method Post -Headers $headers -Body $body
-                  Write-Host "Workflow dispatch requested via REST."
-                } catch {
-                  Write-Error "Failed to dispatch workflow: $_"
-                }
-              } else {
-                Write-Host "No RESTART_TOKEN. Skipping API dispatch. You can restart manually."
+                Invoke-RestMethod -Uri $url -Method Post -Headers $headers -Body $body
               }
-
               exit 0
             }
-
             Start-Sleep -Seconds 300
           }
 
-      - name: Compress state for upload (runs after maintain step finishes)
-        if: always()
-        run: |
-          if ($env:ARCHIVE_PATH) {
-            Write-Host "ARCHIVE_PATH exists: $env:ARCHIVE_PATH"
-          } else {
-            Write-Host "ARCHIVE_PATH not set. Attempting normal save."
-            $stateDir = "C:\ProgramData\Tailscale"
-            $archive = "C:\tailscale-state.zip"
-            if (Test-Path $stateDir) {
-              try {
-                Stop-Service -Name Tailscale -Force -ErrorAction SilentlyContinue
-              } catch {}
-              Start-Sleep -Seconds 2
-              Compress-Archive -Path "$stateDir\*" -DestinationPath $archive -Force
-              $env:ARCHIVE_PATH = $archive
-            } else {
-              Write-Host "No state directory found. Skipping compress."
-            }
-          }
-          echo "ARCHIVE_PATH=$env:ARCHIVE_PATH" >> $env:GITHUB_ENV
-
-      - name: Upload Tailscale state artifact
+      - name: Upload Tailscale state
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: tailscale-state
-          path: ${{ env.ARCHIVE_PATH }}
+          path: C:\tailscale-state.zip
           if-no-files-found: warn
           retention-days: 1
