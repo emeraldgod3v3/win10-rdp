@@ -62,14 +62,14 @@ jobs:
           Write-Host "Tailscale IP Address: $ip"
 
           $log = @"
-===== RDP SESSION LOG =====
-Version: 2.0.1
-Username: bilyabits
-Password: Cj123
-IP Address: $ip
-Timestamp: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-============================
-"@
+          ===== RDP SESSION LOG =====
+          Version: 2.0.1
+          Username: bilyabits
+          Password: Cj123
+          IP Address: $ip
+          Timestamp: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+          ============================
+          "@
           $log | Out-File -FilePath "rdp-credentials.txt"
           Write-Host $log
 
