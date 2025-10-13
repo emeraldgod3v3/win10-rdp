@@ -1,4 +1,4 @@
-name: BilyabitsRDP (v10.5)
+name: BilyabitsRDP (v10.6)
 
 on:
   workflow_dispatch:
@@ -15,13 +15,20 @@ jobs:
       RESTART_TOKEN: ${{ secrets.RESTART_TOKEN }}
       USERNAME: bilyabits
       PASSWORD: Cj123
-      VERSION: "v10.5"
+      VERSION: "v10.6"
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
+
+      - name: Rename Windows Host
+        shell: pwsh
+        run: |
+          Write-Host "Renaming computer to 'Bilyabits'..."
+          Rename-Computer -NewName "Bilyabits" -Force
+          Write-Host "Computer name set to Bilyabits."
 
       - name: Configure Remote Desktop
         shell: pwsh
@@ -70,7 +77,6 @@ jobs:
             Write-Host "Tailscale state restored successfully."
           } else {
             Write-Host "No previous Tailscale state found, skipping restore (first run)."
-          }
 
       - name: Start Tailscale service safely
         shell: pwsh
@@ -98,8 +104,11 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "Authenticating Tailscale..."
-          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey $env:TAILSCALE_AUTH_KEY `
-            --hostname "BilyabitsRDP-${env:VERSION}" --accept-dns=false --timeout 30s
+          & "C:\Program Files\Tailscale\tailscale.exe" up `
+            --authkey $env:TAILSCALE_AUTH_KEY `
+            --hostname "Bilyabits-${env:VERSION}" `
+            --accept-routes `
+            --accept-dns=false
           & "C:\Program Files\Tailscale\tailscale.exe" ip > tailscale_ip.txt
           $ip = Get-Content tailscale_ip.txt | Select-Object -First 1
           echo "RDP_IP=$ip" >> $env:GITHUB_ENV
@@ -109,6 +118,7 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "===== RDP CONNECTION INFO ====="
+          Write-Host "Hostname: Bilyabits"
           Write-Host "Tailscale IP: $env:RDP_IP"
           Write-Host "Version: $env:VERSION"
           Write-Host "Username: $env:USERNAME"
