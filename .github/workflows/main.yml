@@ -1,4 +1,4 @@
-name: BilyabitsRDP (v10.6)
+name: BilyabitsRDP (v10.8)
 
 on:
   workflow_dispatch:
@@ -118,7 +118,7 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "===== RDP CONNECTION INFO ====="
-          Write-Host "Hostname: Bilyabits"
+          Write-Host "Hostname: bilyabits.com"
           Write-Host "Tailscale IP: $env:RDP_IP"
           Write-Host "Version: $env:VERSION"
           Write-Host "Username: $env:USERNAME"
