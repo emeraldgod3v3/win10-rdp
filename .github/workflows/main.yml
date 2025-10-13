@@ -1,4 +1,4 @@
-name: BilyabitsRDP (v10.2)
+name: BilyabitsRDP (v10.3)
 
 on:
   workflow_dispatch:
@@ -8,17 +8,17 @@ on:
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 1440  # 24 hours max
+    timeout-minutes: 1440  # 24 hours max runtime
 
     env:
       TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
       RESTART_TOKEN: ${{ secrets.RESTART_TOKEN }}
       USERNAME: bilyabits
       PASSWORD: Cj123
-      VERSION: "v10.2"
+      VERSION: "v10.3"
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
@@ -43,7 +43,7 @@ jobs:
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction SilentlyContinue
           echo "RDP_CREDS=User: $user | Password: $pass" >> $env:GITHUB_ENV
 
-      - name: Install Tailscale if missing
+      - name: Install Tailscale (if missing)
         shell: pwsh
         run: |
           $exe = "C:\Program Files\Tailscale\tailscale.exe"
@@ -56,12 +56,22 @@ jobs:
             Write-Host "Tailscale already installed."
           }
 
-      - name: Start Tailscale service
+      - name: Start Tailscale service safely
         shell: pwsh
+        continue-on-error: true
         run: |
-          Write-Host "Starting Tailscale services..."
-          Start-Service "Tailscale"
-          Start-Service "Tailscale IPN Service"
+          Write-Host "Starting Tailscale service..."
+          $svc = Get-Service | Where-Object { $_.Name -like "Tailscale*" }
+          if ($null -ne $svc) {
+            if ($svc.Status -ne "Running") {
+              Start-Service $svc.Name
+              Write-Host "Service $($svc.Name) started successfully."
+            } else {
+              Write-Host "Service $($svc.Name) already running."
+            }
+          } else {
+            Write-Host "No Tailscale service found. Skipping start."
+          }
 
       - name: Restore previous Tailscale state (ignore on first run)
         shell: pwsh
@@ -70,31 +80,42 @@ jobs:
           Write-Host "Restoring previous Tailscale state if available..."
           $statePath = "$env:USERPROFILE\AppData\Local\Tailscale\tailscaled.state"
           if (Test-Path $statePath) {
-            Write-Host "Tailscale state found."
+            Write-Host "Tailscale state found and loaded."
           } else {
-            Write-Host "No previous state found. Skipping restore."
+            Write-Host "No previous Tailscale state found. Skipping restore."
           }
 
       - name: Connect Tailscale
         shell: pwsh
         run: |
-          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey $env:TAILSCALE_AUTH_KEY --hostname "WinRDP-${{ env.VERSION }}" --accept-routes
+          Write-Host "Connecting to Tailscale..."
+          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey $env:TAILSCALE_AUTH_KEY --hostname "WinRDP-${{ env.VERSION }}" --accept-routes --unattended
           $ip = (& "C:\Program Files\Tailscale\tailscale.exe" ip -4)[0]
           echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
+          Write-Host "Connected with IP: $ip"
 
-      - name: Log full RDP info (with IP)
+      - name: Log RDP credentials with IP
         shell: pwsh
         run: |
           $user = $env:USERNAME
           $pass = $env:PASSWORD
           $ip = $env:TAILSCALE_IP
           $ver = $env:VERSION
-          $log = "RDP Version: $ver`nUser: $user`nPassword: $pass`nTailscale IP: $ip`nTimestamp: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-          Write-Host "`n--- RDP SESSION INFO ---`n$log`n------------------------"
-          Set-Content -Path "RDP_LOG_${ver}.txt" -Value $log
+          $log = @"
+          ====== RDP SESSION LOG ======
+          Version: $ver
+          Tailscale IP: $ip
+          Username: $user
+          Password: $pass
+          Timestamp: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+          =============================
+          "@
+          $log | Out-File -FilePath "RDP_LOG_${ver}.txt"
+          Write-Host $log
 
-      - name: Schedule auto-restart
+      - name: Auto restart workflow
         shell: pwsh
         run: |
-          Write-Host "Auto restart scheduled every 6 hours."
-          Write-Host "Session active until next trigger."
+          Write-Host "Triggering auto restart..."
+          gh workflow run "BilyabitsRDP (v10.3)" --ref main
+          Write-Host "Restart triggered successfully."
