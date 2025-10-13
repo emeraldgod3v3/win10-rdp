@@ -77,7 +77,7 @@ jobs:
             Write-Host "Tailscale state restored successfully."
           } else {
             Write-Host "No previous Tailscale state found, skipping restore (first run)."
-
+          }
       - name: Start Tailscale service safely
         shell: pwsh
         run: |
