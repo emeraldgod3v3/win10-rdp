@@ -106,7 +106,7 @@ jobs:
           Write-Host "Authenticating Tailscale..."
           & "C:\Program Files\Tailscale\tailscale.exe" up `
             --authkey $env:TAILSCALE_AUTH_KEY `
-            --hostname "Bilyabits-${env:VERSION}" `
+            --hostname "bilyabits.com" `
             --accept-routes `
             --accept-dns=false
           & "C:\Program Files\Tailscale\tailscale.exe" ip > tailscale_ip.txt
