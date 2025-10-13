@@ -1,21 +1,21 @@
-name: BilyabitsRDP (v10.3)
+name: BilyabitsRDP (v10.5)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */6 * * *"  # every 6 hours (UTC)
+    - cron: "0 */6 * * *"  # Run every 6 hours (UTC)
 
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 1440  # 24 hours max runtime
+    timeout-minutes: 1440  # 24 hours
 
     env:
       TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
       RESTART_TOKEN: ${{ secrets.RESTART_TOKEN }}
       USERNAME: bilyabits
       PASSWORD: Cj123
-      VERSION: "v10.3"
+      VERSION: "v10.5"
 
     steps:
       - name: Checkout repository
@@ -23,15 +23,16 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Configure RDP and firewall
+      - name: Configure Remote Desktop
         shell: pwsh
         run: |
-          Write-Host "Enable RDP and firewall."
+          Write-Host "Enabling RDP and firewall..."
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
             -Name fDenyTSConnections -Value 0 -Force
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Write-Host "RDP enabled successfully."
 
-      - name: Create RDP user if missing
+      - name: Create RDP user
         shell: pwsh
         run: |
           $user = $env:USERNAME
@@ -42,8 +43,9 @@ jobs:
           Add-LocalGroupMember -Group "Administrators" -Member $user -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user -ErrorAction SilentlyContinue
           echo "RDP_CREDS=User: $user | Password: $pass" >> $env:GITHUB_ENV
+          Write-Host "User $user added with RDP access."
 
-      - name: Install Tailscale (if missing)
+      - name: Install Tailscale
         shell: pwsh
         run: |
           $exe = "C:\Program Files\Tailscale\tailscale.exe"
@@ -51,71 +53,98 @@ jobs:
             Write-Host "Installing Tailscale..."
             Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "tailscale-setup.exe"
             Start-Process -FilePath ".\tailscale-setup.exe" -ArgumentList "/quiet" -Wait
-            Remove-Item .\tailscale-setup.exe -Force -ErrorAction SilentlyContinue
+            Remove-Item ".\tailscale-setup.exe" -Force -ErrorAction SilentlyContinue
           } else {
             Write-Host "Tailscale already installed."
           }
 
+      - name: Restore Tailscale state if exists
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Write-Host "Restoring previous Tailscale state if exists..."
+          if (Test-Path "C:\TailscaleState") {
+            Stop-Service -Name "Tailscale" -ErrorAction SilentlyContinue
+            Remove-Item -Path "C:\ProgramData\Tailscale" -Recurse -Force -ErrorAction SilentlyContinue
+            Copy-Item -Path "C:\TailscaleState" -Destination "C:\ProgramData\Tailscale" -Recurse -Force
+            Write-Host "Tailscale state restored successfully."
+          } else {
+            Write-Host "No previous Tailscale state found, skipping restore (first run)."
+          }
+
       - name: Start Tailscale service safely
         shell: pwsh
-        continue-on-error: true
         run: |
-          Write-Host "Starting Tailscale service..."
-          $svc = Get-Service | Where-Object { $_.Name -like "Tailscale*" }
-          if ($null -ne $svc) {
-            if ($svc.Status -ne "Running") {
-              Start-Service $svc.Name
-              Write-Host "Service $($svc.Name) started successfully."
+          Write-Host "Starting Tailscale service safely..."
+          try {
+            $svc = Get-Service -Name "Tailscale*" -ErrorAction SilentlyContinue
+            if ($null -ne $svc) {
+              foreach ($s in $svc) {
+                if ($s.Status -ne "Running") {
+                  Start-Service $s.Name
+                  Write-Host "Service $($s.Name) started."
+                } else {
+                  Write-Host "Service $($s.Name) already running."
+                }
+              }
             } else {
-              Write-Host "Service $($svc.Name) already running."
+              Write-Host "No Tailscale service found, skipping."
             }
-          } else {
-            Write-Host "No Tailscale service found. Skipping start."
+          } catch {
+            Write-Host "Failed to manage Tailscale service: $($_.Exception.Message)"
           }
 
-      - name: Restore previous Tailscale state (ignore on first run)
+      - name: Authenticate Tailscale
         shell: pwsh
-        continue-on-error: true
         run: |
-          Write-Host "Restoring previous Tailscale state if available..."
-          $statePath = "$env:USERPROFILE\AppData\Local\Tailscale\tailscaled.state"
-          if (Test-Path $statePath) {
-            Write-Host "Tailscale state found and loaded."
-          } else {
-            Write-Host "No previous Tailscale state found. Skipping restore."
+          Write-Host "Authenticating Tailscale..."
+          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey $env:TAILSCALE_AUTH_KEY `
+            --hostname "BilyabitsRDP-${env:VERSION}" --accept-dns=false --timeout 30s
+          & "C:\Program Files\Tailscale\tailscale.exe" ip > tailscale_ip.txt
+          $ip = Get-Content tailscale_ip.txt | Select-Object -First 1
+          echo "RDP_IP=$ip" >> $env:GITHUB_ENV
+          Write-Host "Tailscale connected with IP: $ip"
+
+      - name: Display RDP connection info
+        shell: pwsh
+        run: |
+          Write-Host "===== RDP CONNECTION INFO ====="
+          Write-Host "Tailscale IP: $env:RDP_IP"
+          Write-Host "Version: $env:VERSION"
+          Write-Host "Username: $env:USERNAME"
+          Write-Host "Password: $env:PASSWORD"
+          Write-Host "================================"
+
+      - name: Keep session alive
+        shell: pwsh
+        run: |
+          Write-Host "Keeping the RDP session active for 24 hours..."
+          Start-Sleep -Seconds 86400
+
+      - name: Save Tailscale state before shutdown
+        if: always()
+        shell: pwsh
+        run: |
+          Write-Host "Saving Tailscale state..."
+          New-Item -ItemType Directory -Force -Path "C:\TailscaleState" | Out-Null
+          Copy-Item -Path "C:\ProgramData\Tailscale" -Destination "C:\TailscaleState" -Recurse -Force -ErrorAction SilentlyContinue
+          Write-Host "Tailscale state saved."
+
+      - name: Auto-restart workflow if session ends
+        if: always()
+        shell: pwsh
+        run: |
+          Write-Host "Triggering auto-restart using RESTART_TOKEN..."
+          $repo = "${{ github.repository }}"
+          $url = "https://api.github.com/repos/$repo/actions/workflows/${{ github.workflow }}/dispatches"
+          $headers = @{
+            "Accept" = "application/vnd.github+json"
+            "Authorization" = "Bearer $env:RESTART_TOKEN"
           }
-
-      - name: Connect Tailscale
-        shell: pwsh
-        run: |
-          Write-Host "Connecting to Tailscale..."
-          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey $env:TAILSCALE_AUTH_KEY --hostname "WinRDP-${{ env.VERSION }}" --accept-routes --unattended
-          $ip = (& "C:\Program Files\Tailscale\tailscale.exe" ip -4)[0]
-          echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
-          Write-Host "Connected with IP: $ip"
-
-      - name: Log RDP credentials with IP
-        shell: pwsh
-        run: |
-          $user = $env:USERNAME
-          $pass = $env:PASSWORD
-          $ip = $env:TAILSCALE_IP
-          $ver = $env:VERSION
-          $log = @"
-          ====== RDP SESSION LOG ======
-          Version: $ver
-          Tailscale IP: $ip
-          Username: $user
-          Password: $pass
-          Timestamp: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-          =============================
-          "@
-          $log | Out-File -FilePath "RDP_LOG_${ver}.txt"
-          Write-Host $log
-
-      - name: Auto restart workflow
-        shell: pwsh
-        run: |
-          Write-Host "Triggering auto restart..."
-          gh workflow run "BilyabitsRDP (v10.3)" --ref main
-          Write-Host "Restart triggered successfully."
+          $body = '{"ref": "main"}'
+          try {
+            Invoke-RestMethod -Uri $url -Headers $headers -Method Post -Body $body
+            Write-Host "Workflow restarted successfully."
+          } catch {
+            Write-Host "Failed to restart workflow: $($_.Exception.Message)"
+          }
